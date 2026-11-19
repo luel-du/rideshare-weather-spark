@@ -1,0 +1,5 @@
+.venv/
+data/
+spark-events/
+.ipynb_checkpoints/
+__pycache__/
