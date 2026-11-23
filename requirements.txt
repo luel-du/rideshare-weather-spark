@@ -1,7 +1,10 @@
 pyspark==4.3.0
-jupyter
-nbconvert
-jupytext
-pyarrow
-pandas<3
-numpy
+jupyter==1.1.1
+notebook==7.6.5
+ipykernel==7.4.0
+nbconvert==7.17.2
+jupytext==1.19.6
+pyarrow==26.0.1
+pandas==2.3.3
+numpy==2.5.5
+matplotlib==3.11.2
