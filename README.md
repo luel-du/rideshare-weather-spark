@@ -5,9 +5,10 @@ A PySpark pipeline that joins four months of New York City Uber and Lyft trips t
 | File | What it is |
 |---|---|
 | [`uber_lyft_weather_pipeline.ipynb`](uber_lyft_weather_pipeline.ipynb) | The executed notebook (all outputs included) |
-| [`uber_lyft_weather_pipeline.html`](uber_lyft_weather_pipeline.html) | HTML export of the same notebook |
+| [`docs/uber_lyft_weather_pipeline.html`](docs/uber_lyft_weather_pipeline.html) | HTML export of the same notebook |
 | [`pipeline.py`](pipeline.py) | The same code as a plain Python script (Jupytext percent format) |
 | [`screenshots/`](screenshots) | Spark UI Query Details, execution plan and run screenshots |
+| [`scripts/make_charts.py`](scripts/make_charts.py) | Draws the chart in `charts/` from the pipeline's result table |
 
 ## Dataset
 
@@ -27,6 +28,8 @@ The notebook downloads all three datasets itself on first run (about 1.85 GB), s
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # needs Java 17 or 21
 jupyter nbconvert --to notebook --execute --inplace uber_lyft_weather_pipeline.ipynb
+jupyter nbconvert --to html --output-dir docs uber_lyft_weather_pipeline.ipynb
+python scripts/make_charts.py            # optional: redraw the chart
 ```
 
 Run time is about 7 minutes on a laptop (`local[6]`, 3 GB driver memory, Spark 4.3.0). The notebook also detects Databricks and switches to a Unity Catalog volume, but that path has not been run; on serverless compute `.cache()` and the Spark UI metrics helper are not available.
@@ -75,6 +78,8 @@ Run time is about 7 minutes on a laptop (`local[6]`, 3 GB driver memory, Spark 4
 
 ## Key findings from the data
 
+![Change in trips per day, fare per mile and wait time against dry days, by weather type and company](charts/weather_effect.png)
+
 These are observational comparisons over 121 days with one daily weather reading for the whole city, so they show association, not cause.
 
 1. **Heavy rain raises demand and price; light rain does not.** On the 12 heavy-rain days Uber carried 508,292 trips a day against 457,364 on dry days (+11%), and Lyft 201,716 against 168,386 (+20%). Fare per mile rose 12% on Uber ($7.31 to $8.18) and 9% on Lyft ($6.99 to $7.60). Light-rain days were within 1% of dry days on trips and price.
@@ -85,3 +90,15 @@ These are observational comparisons over 121 days with one daily weather reading
 6. **Daily weather did not improve the demand model.** A gradient-boosted tree model predicting trips per borough per hour reached R² 0.969 (RMSE 752 on a mean of 5,210) from hour, day of week and borough alone. Adding rain and temperature made held-out days slightly worse (RMSE 808), which is consistent with finding 1: only the 12 heavy-rain days move demand, probably too few for the model to learn from.
 
 Uber carried 72.9% of the 76.9M trips in the cleaned data.
+
+## Limitations and next steps
+
+- **Weather is one reading per day for the whole city.** A storm that lasts two hours is spread over 24. Hourly weather would sharpen every comparison and is the first thing to add.
+- **121 days, winter to early spring.** There are only 12 heavy-rain days and 6 snow days, and no control for holidays or events.
+- **Averages of ratios.** Driver share and fare per mile are averaged per trip, so short trips weigh as much as long ones.
+- **Run locally only.** The notebook has a Databricks path that has not been run; on serverless compute `.cache()` and the Spark UI metrics helper are unavailable.
+- **Source files have no statistics.** Rewriting the raw trips once, sorted by date, would let date filters skip row groups from the start.
+
+## Data sources and licence
+
+Trip records and the zone lookup are published by the [NYC Taxi & Limousine Commission](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page). Weather observations come from [NOAA's Global Historical Climatology Network Daily](https://www.ncei.noaa.gov/products/land-based-station/global-historical-climatology-network-daily). Neither dataset is redistributed here. The code in this repository is released under the [MIT licence](LICENSE).
