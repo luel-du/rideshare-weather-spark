@@ -46,29 +46,18 @@ Run time is about 7 minutes on a laptop (`local[6]`, 3 GB driver memory, Spark 4
 
 ## Performance analysis
 
-**How Spark optimized the query.** The main aggregation is written as select, three filters, ten `withColumn` calls, two joins and a `groupBy`, but Catalyst collapses it into one scan-side pipeline. The physical plan ([screenshot](screenshots/09_explain_physical_plan.png)) reads only 10 of the 24 columns (`ReadSchema`), merges my three `filter` calls into a single predicate, and runs scan, filter, projections, both joins and the first aggregation inside one whole-stage-codegen stage. Both joins are `BroadcastHashJoin`: the 263-row zone table and the 121-row weather table are sent to every task, so the 77M trip rows are never shuffled for a join. The aggregation is split into a partial `HashAggregate` before the shuffle and a final one after, which is why the `Exchange` carries 266 rows instead of 77 million ([Query Details](screenshots/03_query_details_main_aggregation.png)). Adaptive Query Execution then coalesced the 24 shuffle partitions into one (`AQEShuffleRead coalesced`). I also checked whether filter order in my code matters: writing the filter before or after the join gives an identical Parquet scan, because the optimizer moves it down either way.
+**How Spark optimized the query.** The main aggregation is written as a select, three filters, ten `withColumn` calls, two joins and a `groupBy`, but the [physical plan](screenshots/09_explain_physical_plan.png) shows Catalyst collapsing it into a single stage. It reads only 10 of the 24 columns, merges the three filters into one predicate, and uses a `BroadcastHashJoin` for both small tables, so the 77M trip rows are never shuffled for a join. A partial aggregation runs before the shuffle, which is why only 266 rows cross it ([Query Details](screenshots/03_query_details_main_aggregation.png)).
 
-**Where filters were pushed down, and where that did not help.** All three filters appear in `PushedFilters` on the Parquet scan, and the filter on `LocationID` was even propagated to the zones CSV scan through the join key. But the Spark UI showed the trips scan still emitting all 80,036,904 rows. Two causes turned up. First, the raw TLC files have no min/max statistics in their footers (0 of 19 row groups), so the reader has nothing to skip with. Second, on my own output files, which do have statistics, a range filter on the `timestamp_ntz` column was listed as pushed yet still read all 76.9M rows in this Spark version. The same question asked on the stored `DATE` column read 3.4M rows (4.4%):
+**Where filters were pushed down.** All three filters appear in `PushedFilters` on the Parquet scan, yet the Spark UI showed the scan still reading all 80M rows: the raw TLC files carry no min/max statistics, so the reader had nothing to skip with. On the pipeline's own output, which does have statistics, a filter on the stored `pickup_date` column read 3.4M of 76.9M rows, while the same filter written as `to_date(pickup_datetime)` could not be pushed and read every row ([skipped](screenshots/04_query_details_date_filter_skips_rows.png) vs [not skipped](screenshots/05_query_details_function_filter_reads_all.png)). `PushedFilters` shows what was offered to the reader; the scan's row count shows what was saved.
 
-| Query: trips on 20-21 Feb | `PushedFilters` | Rows read by scan | Time |
-|---|---|---|---|
-| A. Raw files, timestamp range | listed | 80,036,904 | 1.03 s |
-| B. Output files, timestamp range | listed | 76,922,262 | 0.89 s |
-| C. Output files, `pickup_date` (DATE) range | listed | **3,413,548** | **0.17 s** |
-| D. Output files, `to_date(pickup_datetime)` | empty | 76,922,262 | 1.68 s |
+**Bottlenecks and optimizations.** The slowest step is the partitioned write (117 s, about a quarter of the run). Partitioning by month, which matches the input files, avoided a shuffle before the write and lets later queries prune whole folders. The second cost is that every action re-reads the source; caching a small hourly summary that three later queries and the ML model reuse removed that. Broadcasting the lookup tables instead of letting Spark sort-merge them was the other large saving.
 
-So `PushedFilters` shows what was offered to the reader; the scan's row count shows what was saved ([C](screenshots/04_query_details_date_filter_skips_rows.png) vs [D](screenshots/05_query_details_function_filter_reads_all.png)). Partition pruning was the most reliable saving: a filter on `pickup_month` appears under `PartitionFilters` and the February query on the output finished in 0.6 s.
-
-**Bottlenecks and how I addressed them.** (1) *Join strategy.* With broadcasting disabled, the same join-and-count ran as a sort-merge join: 77M rows shuffled and sorted, 17.4 s against 5.6 s with a broadcast join (3.1x). (2) *Repeated full scans.* Every action re-reads the source, about 9 to 16 s per query. Caching a 29,037-row hourly summary that three later queries and the ML model reuse cut those three queries from 34.6 s to 0.7 s (48x); including the 16.6 s to fill the cache the total was 17.3 s, half the uncached time. I did not cache the 77M-row table because it does not fit in a 3 GB driver. (3) *The write.* At 117 s the partitioned write is the slowest step, about a quarter of the whole run, because it materializes 24 columns for 77M rows. I partitioned by month (4 values, matching the input files) so no shuffle was needed and each folder got 4 files of roughly 200 MB; partitioning by date would have required a shuffle to avoid hundreds of small files. (4) *`count(distinct)`.* It adds a second aggregation level and a second shuffle to the plan; it stayed cheap here only because the partial aggregation had already reduced the data to 266 rows. (5) I lowered `spark.sql.shuffle.partitions` from 200 to 24, since every aggregate in this pipeline is small after partial aggregation.
-
-| Measurement | Result |
-|---|---|
-| Define 3 transformations on 80M rows | 122 ms, no job started |
-| First action on that plan | 2.4 s |
-| Main aggregation over 77M rows (2 joins, 8 aggregates) | 25.9 s |
-| Sort-merge join vs broadcast join | 17.4 s vs 5.6 s |
-| 3 follow-up queries, uncached vs cached | 34.6 s vs 0.7 s |
-| Write 76.9M rows, partitioned by month | 116.5 s, 3.1 GB, 16 files |
+| Optimization | Without | With |
+|---|---|---|
+| Broadcast join instead of sort-merge | 17.4 s | 5.6 s |
+| Cache the hourly summary (3 follow-up queries) | 34.6 s | 0.7 s, plus 16.6 s to fill the cache |
+| Filter on a stored DATE column instead of a function | 76.9M rows read | 3.4M rows read |
+| Partition pruning on `pickup_month` (February only) | n/a | 0.6 s |
 
 ### Screenshots
 
